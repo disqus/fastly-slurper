@@ -47,7 +47,7 @@ class Fastly(requests.Session):
         super(Fastly, self).__init__()
 
         self.headers.update({
-            'X-Fastly-Key': api_key,
+            'Fastly-Key': api_key,
             'User-Agent': self.user_agent,
         })
 
