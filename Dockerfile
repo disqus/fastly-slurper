@@ -1,6 +1,6 @@
 FROM python:2.7-onbuild
-MAINTAINER Matt Robenolt <matt@disqus.com>
+MAINTAINER Disqus <opensource@disqus.com>
 
-RUN pip install .
+RUN pip install -e .
 
 ENTRYPOINT ["fastly-slurper"]

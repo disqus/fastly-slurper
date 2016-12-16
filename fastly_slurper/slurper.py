@@ -2,60 +2,57 @@
 fastly_slurper.slurper
 ~~~~~~~~~~~~~~~~~~~~~~
 
-:copyright: (c) 2015 Disqus, Inc.
+:copyright: (c) 2016 Disqus, Inc.
 :license: Apache, see LICENSE for more details.
 """
-import sys
+from __future__ import (absolute_import, division, generators, nested_scopes,
+                        print_function, unicode_literals, with_statement)
+
+import logging
 import threading
-from time import time, sleep
+import requests
+import six
+
 from datetime import datetime
 from os.path import join
-
-import requests
+from time import sleep, time
 from pystatsd import Client as StatsdClient
 
+from . import __version__
 
-class Statsd(StatsdClient):
-    def __init__(self, address=('localhost', 8125), prefix=None, verbose=True):
-        self.verbose = verbose
-        super(Statsd, self).__init__(address[0], address[1], prefix)
+log = logging.getLogger(__name__)
 
-    def timing(self, stat, time):
-        self._log('timing', stat, time)
-        super(Statsd, self).timing(stat, time)
-
-    def gauge(self, stat, time):
-        self._log('gauge', stat, time)
-        super(Statsd, self).gauge(stat, time)
-
-    def _log(self, type, stat, value):
-        if self.verbose:
-            sys.stderr.write(
-                '{now} [{type}] {stat} {value}\n'.format(
-                    now=datetime.now(), type=type,
-                    stat=stat if self.prefix is None else '.'.join((self.prefix, stat)),
-                    value=value,
-                )
-            )
+_FASTLY_API_BASE_URI = 'https://rt.fastly.com/'
+_USER_AGENT = 'fastly-slurpy/%s' % __version__
 
 
 class Fastly(requests.Session):
-    base = 'https://rt.fastly.com/'
-    user_agent = 'fastly-slurper/1.0'
+    base = _FASTLY_API_BASE_URI
+    user_agent = _USER_AGENT
 
-    def __init__(self, api_key):
-        super(Fastly, self).__init__()
+    def __init__(self, api_key, *args, **kwargs):
+        self.api_key = api_key
+
+        super(Fastly, self).__init__(*args, **kwargs)
 
         self.headers.update({
-            'Fastly-Key': api_key,
+            'Fastly-Key': self.api_key,
             'User-Agent': self.user_agent,
         })
 
-    def request(self, method, url, **kwargs):
-        return super(Fastly, self).request(method=method, url=self.base+url, **kwargs)
+    def _ensure_abs_url(self, url):
+        # ensure abs
+        if '://' not in url:
+            url = '%s%s' % (self.base, url)
+        return url
+
+    def request(self, method, url, *args, **kwargs):
+        url = self._ensure_abs_url(url)
+        return super(Fastly, self).request(method=method, url=url, **kwargs)
 
 
 class RecorderWorker(threading.Thread):
+
     def __init__(self, client, publisher, service, delay=1.0):
         super(RecorderWorker, self).__init__()
         self.daemon = True
@@ -66,10 +63,12 @@ class RecorderWorker(threading.Thread):
         self.delay = delay
 
     def timing(self, stat, time):
-        self.publisher.timing(self.name + '.' + stat, time)
+        stat = '%s.%s' % (self.name, stat)
+        return self.publisher.timing(stat, time)
 
     def gauge(self, stat, time):
-        self.publisher.gauge(self.name + '.' + stat, time)
+        stat = '%s.%s' % (self.name, stat)
+        return self.publisher.gauge(stat, time)
 
     def url_for_timestamp(self, ts):
         # Convert timestamp to str and remove the decimal
@@ -83,8 +82,8 @@ class RecorderWorker(threading.Thread):
     def record_stats(self, message):
         for stats in message:
             if 'datacenter' in stats:
-                for dc, dcstats in stats['datacenter'].iteritems():
-                    for stat, val in dcstats.iteritems():
+                for dc, dcstats in six.iteritems(stats['datacenter']):
+                    for stat, val in six.iteritems(dcstats):
                         if stat == 'miss_histogram':
                             continue
 
@@ -99,10 +98,19 @@ class RecorderWorker(threading.Thread):
                 self.gauge('last_record', int(time()))
 
     def run(self):
-        while True:
+        self.running = True
+
+        while self.running:
+            ts = time()
+
             try:
-                self.record_stats(self.get_stats(time()))
+                log.debug('Fetching stats for ts=%s'.ts)
+                stats = self.get_stats(ts)
+
+                log.info('Recording stats for ts=%s: %r', ts, stats)
+                self.record_stats(stats)
             except Exception:
-                import traceback
-                traceback.print_exc(file=sys.stderr)
-            sleep(self.delay)
+                log.exception('Failed slurp for ts=%s; exception follows:', ts)
+
+            if time() <= ts + self.delay:
+                sleep(self.delay)
